@@ -18,6 +18,7 @@
 #include <mutex>
 #include <deque>
 #include <sstream>
+#include <arpa/inet.h>
 
 constexpr int MAX_EVENTS = 1024;
 constexpr int BUFFER_SIZE = 4096;
@@ -919,6 +920,35 @@ public:
         IConnection::set_nonblock(server_fd_);
     }
 
+    IAcceptor(const std::string &ip, int port) {
+        server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        if(server_fd_ < 0) {
+            perror("socket");
+            exit(EXIT_FAILURE);
+        }
+
+        int opt = 1;
+        setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr(ip.c_str());
+        addr.sin_port = htons(port);
+
+        if(bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0){
+            perror("bind");
+            exit(EXIT_FAILURE);
+        }
+
+        if(listen(server_fd_, 10) < 0){
+            perror("listen");
+            exit(EXIT_FAILURE);
+        }
+
+        IConnection::set_nonblock(server_fd_);
+
+    }
+
     ~IAcceptor(){
         close(server_fd_);
     }
@@ -945,16 +975,16 @@ protected:
         }
     }
     virtual void on_new_connection(int new_fd) = 0;
-
+    // struct sockaddr_in addr_;
     int server_fd_;
 };
 
 class HttpAcceptor : public IAcceptor, public std::enable_shared_from_this<HttpAcceptor>
 {
 public:
-    HttpAcceptor(int port) : IAcceptor(port){
-        
-    }
+    HttpAcceptor(int port) : IAcceptor(port){}
+
+    HttpAcceptor(const std::string &ip, int port) : IAcceptor(ip, port){}
 
     void init(){
         Reactor::get_instance().register_handler(server_fd_, EPOLLIN, shared_from_this());
@@ -970,9 +1000,9 @@ private:
 class EchoAcceptor : public IAcceptor, public std::enable_shared_from_this<EchoAcceptor>
 {
 public:
-    EchoAcceptor(int port) : IAcceptor(port){
-        
-    }
+    EchoAcceptor(int port) : IAcceptor(port){}
+
+    EchoAcceptor(const std::string &ip, int port) : IAcceptor(ip, port){}
 
     void init(){
         Reactor::get_instance().register_handler(server_fd_, EPOLLIN, shared_from_this());
