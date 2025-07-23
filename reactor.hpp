@@ -19,6 +19,7 @@
 #include <deque>
 #include <sstream>
 #include <arpa/inet.h>
+#include <iomanip>
 
 constexpr int MAX_EVENTS = 1048576;
 constexpr int BUFFER_SIZE = 4096;
@@ -211,6 +212,177 @@ public:
     virtual void handle_event(uint32_t events) = 0;
 };
 
+class IConnection : public IEventHandler
+{
+public:
+    /**
+     * @brief 构造函数，初始化Connection对象并传入文件描述符。
+     * 
+     * @param fd 文件描述符。
+     */
+    IConnection(int fd) : fd_(fd){}
+
+    /**
+     * @brief 虚析构函数，确保派生类的正确析构。
+     */
+    virtual ~IConnection(){
+        close(fd_);
+        fd_ = -1;
+    }
+
+    /**
+     * @brief 返回当前对象的文件描述符。
+     * 
+     * @return int 文件描述符。
+     */
+    virtual int fd() const{
+        return fd_;
+    }
+
+    // virtual void write(const char* data, size_t size) = 0;
+    // virtual void write(const std::string& data) = 0;
+
+    // virtual size_t read(char* buffer, size_t max_len) = 0;
+    // virtual std::string read(size_t max_len = 0) = 0;
+
+
+     /**
+     * @brief 设置文件描述符为非阻塞模式。
+     * 
+     * @param fd 需要设置为非阻塞模式的文件描述符。
+     */
+    
+    static void set_nonblock(int fd){
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0) {
+            perror("fcntl(F_GETFL)");
+            exit(EXIT_FAILURE);
+        }
+        if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            perror("fcntl(F_SETFL)");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    virtual void handle_event(uint32_t events){
+        if(events & EPOLLIN){
+            handle_read();
+        }
+        if(events & EPOLLOUT){
+            handle_write();
+        }
+        if(events & EPOLLERR){
+            handle_error();
+        }
+    }
+
+protected:
+   
+    virtual void handle_read() = 0;
+    virtual void handle_write() = 0;
+    virtual void handle_error() = 0;
+    
+    /**
+     * @brief 文件描述符，用于标识连接。
+     */
+    int fd_;
+    std::string read_buffer_;
+    std::string write_buffer_;
+    std::mutex buffer_mutex_;
+};
+
+class IAcceptor : public IEventHandler
+{
+public:
+    IAcceptor(int port) {
+        server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        if(server_fd_ < 0){
+            perror("socket");
+            exit(EXIT_FAILURE);
+        }
+
+        int opt = 1;
+        setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port = htons(port);
+
+        if(bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0){
+            perror("bind");
+            exit(EXIT_FAILURE);
+        }
+
+        if(listen(server_fd_, 10) < 0){
+            perror("listen");
+            exit(EXIT_FAILURE);
+        }
+
+        IConnection::set_nonblock(server_fd_);
+    }
+
+    IAcceptor(const std::string &ip, int port) {
+        server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        if(server_fd_ < 0) {
+            perror("socket");
+            exit(EXIT_FAILURE);
+        }
+
+        int opt = 1;
+        setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = inet_addr(ip.c_str());
+        addr.sin_port = htons(port);
+
+        if(bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0){
+            perror("bind");
+            exit(EXIT_FAILURE);
+        }
+
+        if(listen(server_fd_, 10) < 0){
+            perror("listen");
+            exit(EXIT_FAILURE);
+        }
+
+        IConnection::set_nonblock(server_fd_);
+
+    }
+
+    ~IAcceptor(){
+        close(server_fd_);
+    }
+
+    void handle_event(uint32_t events) override{
+        if(events & EPOLLIN){
+            accept_connections();
+        }
+    }
+
+protected:
+    void accept_connections(){
+        while(true){
+            int new_fd = accept(server_fd_, nullptr, nullptr);
+            if(new_fd < 0){
+                if(errno == EAGAIN || errno == EWOULDBLOCK){
+                    break;
+                }
+                perror("accept");
+                exit(EXIT_FAILURE);
+            }
+            IConnection::set_nonblock(new_fd);
+            on_new_connection(new_fd);
+        }
+    }
+    virtual void on_new_connection(int new_fd) = 0;
+    // struct sockaddr_in addr_;
+    int server_fd_;
+};
+
+
+
 class Reactor
 {
 public:
@@ -222,6 +394,22 @@ public:
     static Reactor& get_instance(){
         static Reactor instance;
         return instance;
+    }
+
+    size_t connection_count() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        size_t count = 0;
+        for (const auto& [fd, handler] : handlers_) {
+            if (dynamic_cast<IAcceptor*>(handler.get()) == nullptr) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    size_t total_handlers() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return handlers_.size();
     }
 
     /**
@@ -328,84 +516,7 @@ private:
     std::unordered_map<int, std::shared_ptr<IEventHandler>> handlers_;
 };
 
-class IConnection : public IEventHandler
-{
-public:
-    /**
-     * @brief 构造函数，初始化Connection对象并传入文件描述符。
-     * 
-     * @param fd 文件描述符。
-     */
-    IConnection(int fd) : fd_(fd){}
 
-    /**
-     * @brief 虚析构函数，确保派生类的正确析构。
-     */
-    virtual ~IConnection(){
-        close(fd_);
-        fd_ = -1;
-    }
-
-    /**
-     * @brief 返回当前对象的文件描述符。
-     * 
-     * @return int 文件描述符。
-     */
-    virtual int fd() const{
-        return fd_;
-    }
-
-    // virtual void write(const char* data, size_t size) = 0;
-    // virtual void write(const std::string& data) = 0;
-
-    // virtual size_t read(char* buffer, size_t max_len) = 0;
-    // virtual std::string read(size_t max_len = 0) = 0;
-
-
-     /**
-     * @brief 设置文件描述符为非阻塞模式。
-     * 
-     * @param fd 需要设置为非阻塞模式的文件描述符。
-     */
-    
-    static void set_nonblock(int fd){
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags < 0) {
-            perror("fcntl(F_GETFL)");
-            exit(EXIT_FAILURE);
-        }
-        if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-            perror("fcntl(F_SETFL)");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    virtual void handle_event(uint32_t events){
-        if(events & EPOLLIN){
-            handle_read();
-        }
-        if(events & EPOLLOUT){
-            handle_write();
-        }
-        if(events & EPOLLERR){
-            handle_error();
-        }
-    }
-
-protected:
-   
-    virtual void handle_read() = 0;
-    virtual void handle_write() = 0;
-    virtual void handle_error() = 0;
-    
-    /**
-     * @brief 文件描述符，用于标识连接。
-     */
-    int fd_;
-    std::string read_buffer_;
-    std::string write_buffer_;
-    std::mutex buffer_mutex_;
-};
 
 class HttpConnection : public IConnection, public std::enable_shared_from_this<HttpConnection>
 {
@@ -889,95 +1000,6 @@ private:
 
 };
 
-class IAcceptor : public IEventHandler
-{
-public:
-    IAcceptor(int port) {
-        server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        if(server_fd_ < 0){
-            perror("socket");
-            exit(EXIT_FAILURE);
-        }
-
-        int opt = 1;
-        setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        struct sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(port);
-
-        if(bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0){
-            perror("bind");
-            exit(EXIT_FAILURE);
-        }
-
-        if(listen(server_fd_, 10) < 0){
-            perror("listen");
-            exit(EXIT_FAILURE);
-        }
-
-        IConnection::set_nonblock(server_fd_);
-    }
-
-    IAcceptor(const std::string &ip, int port) {
-        server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-        if(server_fd_ < 0) {
-            perror("socket");
-            exit(EXIT_FAILURE);
-        }
-
-        int opt = 1;
-        setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        struct sockaddr_in addr;
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = inet_addr(ip.c_str());
-        addr.sin_port = htons(port);
-
-        if(bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0){
-            perror("bind");
-            exit(EXIT_FAILURE);
-        }
-
-        if(listen(server_fd_, 10) < 0){
-            perror("listen");
-            exit(EXIT_FAILURE);
-        }
-
-        IConnection::set_nonblock(server_fd_);
-
-    }
-
-    ~IAcceptor(){
-        close(server_fd_);
-    }
-
-    void handle_event(uint32_t events) override{
-        if(events & EPOLLIN){
-            accept_connections();
-        }
-    }
-
-protected:
-    void accept_connections(){
-        while(true){
-            int new_fd = accept(server_fd_, nullptr, nullptr);
-            if(new_fd < 0){
-                if(errno == EAGAIN || errno == EWOULDBLOCK){
-                    break;
-                }
-                perror("accept");
-                exit(EXIT_FAILURE);
-            }
-            IConnection::set_nonblock(new_fd);
-            on_new_connection(new_fd);
-        }
-    }
-    virtual void on_new_connection(int new_fd) = 0;
-    // struct sockaddr_in addr_;
-    int server_fd_;
-};
 
 class HttpAcceptor : public IAcceptor, public std::enable_shared_from_this<HttpAcceptor>
 {

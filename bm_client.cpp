@@ -65,13 +65,20 @@ public:
         std::cout << "耗时: " << duration << "毫秒" << std::endl;
         std::cout << "平均建立连接速率" << (total_connections_ * 1000 / duration) << " 连接/秒" << std::endl;
 
+        std::cout << "===========测试结束===========" << std::endl;
+        std::cout << "请输入回车退出" << std::endl;
+        while (1) {
+            std::string input;
+            std::getline(std::cin, input);
+            if (input.empty()) break;
+        }
         stop_ = true;
 
         for (auto& t : workers) {
             t.join();
         }
 
-        std::cout << "===========测试结束===========" << std::endl;
+        
     }
 private:
     void worker_thread(std::atomic<int>& established) {
