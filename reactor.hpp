@@ -20,7 +20,7 @@
 #include <sstream>
 #include <arpa/inet.h>
 
-constexpr int MAX_EVENTS = 1024;
+constexpr int MAX_EVENTS = 1048576;
 constexpr int BUFFER_SIZE = 4096;
 constexpr size_t MAX_WRITE_BUFFER = 1024 * 1024;
 
