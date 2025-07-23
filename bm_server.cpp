@@ -20,7 +20,7 @@ int main(int argc, char **argv)
 
     std::thread stats_thread([]{
         while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(5));
             size_t current_conns = Reactor::get_instance().connection_count();
             size_t total_conns = Reactor::get_instance().total_handlers();
             auto now = std::chrono::system_clock::now();
